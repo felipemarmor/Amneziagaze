@@ -7,9 +7,9 @@
 namespace MyVSTPlugin {
 
 // Unique identifiers for the plugin
-static const char* kPluginName = "AMNEZIAGAZE v0.2.7";
+static const char* kPluginName = "AMNEZIAGAZE v1.0.0";
 static const char* kPluginVendor = "Plugins Legais";
-static const char* kPluginVersion = "0.2.7";
+static const char* kPluginVersion = "1.0.0";
 
 // Plugin unique IDs - these should be unique for your plugin
 // Define processor UID

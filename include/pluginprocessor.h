@@ -110,6 +110,55 @@ private:
     float mTrebleFilter[2][2];  // [channels][state]
     float mPresenceFilter[2][2];// [channels][state]
     
+    // Additional filter states that were causing "bee buzzing" with static variables
+    float mAmpSmoothFilter[2];      // [channels] - amp smoothing per channel
+    float mEqSmoothFilter1[2];      // [channels] - EQ smoothing stage 1
+    float mEqSmoothFilter2[2];      // [channels] - EQ smoothing stage 2
+    float mLowMidFilter[2];         // [channels] - low-mid management
+    float mHighMidFilter[2];        // [channels] - high-mid management
+    float mEqGateState[2];          // [channels] - EQ noise gate state
+    float mGateState[2];            // [channels] - amp noise gate state
+    
+    // Distortion state variables (were static, causing buzzing)
+    float mDistGateState;           // Distortion noise gate state
+    float mDistortionSmoothFilter1; // Distortion smoothing stage 1
+    float mDistortionSmoothFilter2; // Distortion smoothing stage 2
+    float mFuzzSmoother;            // Fuzz effect smoother
+    
+    // Modulation state variables (were static, causing buzzing)
+    float mModGateState;            // Modulation noise gate state
+    float mLfoSmoother;             // LFO smoothing
+    float mModSmoothFilter1;        // Modulation smoothing stage 1
+    float mModSmoothFilter2;        // Modulation smoothing stage 2
+    float mFlangerFeedback;         // Flanger feedback state
+    float mPhaserStage1;            // Phaser allpass stage 1
+    float mPhaserStage2;            // Phaser allpass stage 2
+    float mPhaserStage3;            // Phaser allpass stage 3
+    float mPhaserStage4;            // Phaser allpass stage 4
+    float mPhaserFeedback;          // Phaser feedback state
+    
+    // New tube-style amp simulation state variables
+    float mTubePreampState[2];      // [channels] - tube preamp state
+    float mToneStackLowpass[2];     // [channels] - tone stack lowpass filter
+    float mToneStackHighpass[2];    // [channels] - tone stack highpass filter
+    float mToneStackMidband[2];     // [channels] - tone stack midband filter
+    float mCabinetFilter1[2];       // [channels] - cabinet simulation stage 1
+    float mCabinetFilter2[2];       // [channels] - cabinet simulation stage 2
+    float mCabinetFilter3[2];       // [channels] - cabinet simulation stage 3
+    float mSpeakerResonance[2];     // [channels] - speaker resonance simulation
+    float mTubeCompressionState[2]; // [channels] - tube compression envelope
+    float mInputHighpass[2];        // [channels] - input highpass filter
+    float mOutputLowpass[2];        // [channels] - output anti-aliasing filter
+    
+    // NAM-inspired neural amp modeling state variables
+    float mNeuralHistory[2][8];     // [channels][history_samples] - input history for neural processing
+    float mNeuralWeights[3][8];     // [layers][weights] - simplified neural network weights
+    float mNeuralBias[3];           // [layers] - neural network biases
+    float mNeuralActivation[2][3];  // [channels][layers] - neural activation states
+    int mHistoryIndex[2];           // [channels] - circular buffer index for history
+    float mDynamicGain[2];          // [channels] - dynamic gain adjustment
+    float mMemoryState[2][4];       // [channels][memory] - amp memory simulation
+    
     // Helper methods for audio processing
     float processAmp(float input, int channel);
     float processDistortion(float input);
@@ -118,6 +167,10 @@ private:
     float processComplexReverbSample(float input); // Advanced reverb algorithm
     float processDelay(float input);
     float processModulation(float input);
+    
+    // New tube amp simulation helper methods
+    float processToneStack(float input, int channel);
+    float processCabinetSimulation(float input, int channel);
     
     // Reset all processing state
     void resetProcessingBuffers();

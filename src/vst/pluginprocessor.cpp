@@ -1,6 +1,7 @@
 #include "pluginprocessor.h"
 #include "plugincontroller.h"
 #include "pluginids.h"
+#include "vstlogger.h"
 
 #include "base/source/fstreamer.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
@@ -65,6 +66,84 @@ PluginProcessor::PluginProcessor()
             mPresenceFilter[i][j] = 0.0f;
         }
     }
+    
+    // Initialize additional filter states to prevent "bee buzzing"
+    for (int i = 0; i < 2; i++) {
+        mAmpSmoothFilter[i] = 0.0f;
+        mEqSmoothFilter1[i] = 0.0f;
+        mEqSmoothFilter2[i] = 0.0f;
+        mLowMidFilter[i] = 0.0f;
+        mHighMidFilter[i] = 0.0f;
+        mEqGateState[i] = 0.0f;
+        mGateState[i] = 0.0f;
+    }
+    
+    // Initialize distortion state variables
+    mDistGateState = 0.0f;
+    mDistortionSmoothFilter1 = 0.0f;
+    mDistortionSmoothFilter2 = 0.0f;
+    mFuzzSmoother = 0.0f;
+    
+    // Initialize modulation state variables
+    mModGateState = 0.0f;
+    mLfoSmoother = 0.5f;
+    mModSmoothFilter1 = 0.0f;
+    mModSmoothFilter2 = 0.0f;
+    mFlangerFeedback = 0.0f;
+    mPhaserStage1 = 0.0f;
+    mPhaserStage2 = 0.0f;
+    mPhaserStage3 = 0.0f;
+    mPhaserStage4 = 0.0f;
+    mPhaserFeedback = 0.0f;
+    
+    // Initialize new tube-style amp simulation state variables
+    for (int i = 0; i < 2; i++) {
+        mTubePreampState[i] = 0.0f;
+        mToneStackLowpass[i] = 0.0f;
+        mToneStackHighpass[i] = 0.0f;
+        mToneStackMidband[i] = 0.0f;
+        mCabinetFilter1[i] = 0.0f;
+        mCabinetFilter2[i] = 0.0f;
+        mCabinetFilter3[i] = 0.0f;
+        mSpeakerResonance[i] = 0.0f;
+        mTubeCompressionState[i] = 0.0f;
+        mInputHighpass[i] = 0.0f;
+        mOutputLowpass[i] = 0.0f;
+        
+        // Initialize NAM-inspired neural network state
+        mHistoryIndex[i] = 0;
+        mDynamicGain[i] = 1.0f;
+        
+        for (int j = 0; j < 8; j++) {
+            mNeuralHistory[i][j] = 0.0f;
+        }
+        
+        for (int j = 0; j < 3; j++) {
+            mNeuralActivation[i][j] = 0.0f;
+        }
+        
+        for (int j = 0; j < 4; j++) {
+            mMemoryState[i][j] = 0.0f;
+        }
+    }
+    
+    // Initialize neural network weights and biases (simplified amp model)
+    // Layer 1: Input processing
+    mNeuralWeights[0][0] = 0.8f;  mNeuralWeights[0][1] = -0.3f; mNeuralWeights[0][2] = 0.6f;  mNeuralWeights[0][3] = -0.2f;
+    mNeuralWeights[0][4] = 0.4f;  mNeuralWeights[0][5] = -0.7f; mNeuralWeights[0][6] = 0.5f;  mNeuralWeights[0][7] = -0.1f;
+    
+    // Layer 2: Nonlinear processing
+    mNeuralWeights[1][0] = 1.2f;  mNeuralWeights[1][1] = -0.8f; mNeuralWeights[1][2] = 0.9f;  mNeuralWeights[1][3] = -0.4f;
+    mNeuralWeights[1][4] = 0.7f;  mNeuralWeights[1][5] = -0.6f; mNeuralWeights[1][6] = 1.1f;  mNeuralWeights[1][7] = -0.3f;
+    
+    // Layer 3: Output shaping
+    mNeuralWeights[2][0] = 0.9f;  mNeuralWeights[2][1] = -0.5f; mNeuralWeights[2][2] = 0.8f;  mNeuralWeights[2][3] = -0.2f;
+    mNeuralWeights[2][4] = 0.6f;  mNeuralWeights[2][5] = -0.4f; mNeuralWeights[2][6] = 0.7f;  mNeuralWeights[2][7] = -0.1f;
+    
+    // Biases
+    mNeuralBias[0] = 0.1f;
+    mNeuralBias[1] = -0.05f;
+    mNeuralBias[2] = 0.02f;
 }
 
 //-----------------------------------------------------------------------------
@@ -82,6 +161,10 @@ tresult PLUGIN_API PluginProcessor::initialize(FUnknown* context)
     {
         return result;
     }
+
+    // Initialize logging system
+    VSTLogger::getInstance().initialize("C:/temp/amneziagaze_realtime_log.txt");
+    VST_LOG_INFO("System", "plugin_initialized", 1.0f, "AMNEZIAGAZE v0.3.1 started");
 
     // Set up audio bus arrangements
     // For this simple plugin, we'll use stereo in and stereo out
@@ -175,6 +258,66 @@ void PluginProcessor::resetProcessingBuffers()
             mPresenceFilter[i][j] = 0.0f;
         }
     }
+    
+    // Reset additional filter states to prevent "bee buzzing"
+    for (int i = 0; i < 2; i++) {
+        mAmpSmoothFilter[i] = 0.0f;
+        mEqSmoothFilter1[i] = 0.0f;
+        mEqSmoothFilter2[i] = 0.0f;
+        mLowMidFilter[i] = 0.0f;
+        mHighMidFilter[i] = 0.0f;
+        mEqGateState[i] = 0.0f;
+        mGateState[i] = 0.0f;
+    }
+    
+    // Reset distortion state variables
+    mDistGateState = 0.0f;
+    mDistortionSmoothFilter1 = 0.0f;
+    mDistortionSmoothFilter2 = 0.0f;
+    mFuzzSmoother = 0.0f;
+    
+    // Reset modulation state variables
+    mModGateState = 0.0f;
+    mLfoSmoother = 0.5f;
+    mModSmoothFilter1 = 0.0f;
+    mModSmoothFilter2 = 0.0f;
+    mFlangerFeedback = 0.0f;
+    mPhaserStage1 = 0.0f;
+    mPhaserStage2 = 0.0f;
+    mPhaserStage3 = 0.0f;
+    mPhaserStage4 = 0.0f;
+    mPhaserFeedback = 0.0f;
+    
+    // Reset new tube-style amp simulation state variables
+    for (int i = 0; i < 2; i++) {
+        mTubePreampState[i] = 0.0f;
+        mToneStackLowpass[i] = 0.0f;
+        mToneStackHighpass[i] = 0.0f;
+        mToneStackMidband[i] = 0.0f;
+        mCabinetFilter1[i] = 0.0f;
+        mCabinetFilter2[i] = 0.0f;
+        mCabinetFilter3[i] = 0.0f;
+        mSpeakerResonance[i] = 0.0f;
+        mTubeCompressionState[i] = 0.0f;
+        mInputHighpass[i] = 0.0f;
+        mOutputLowpass[i] = 0.0f;
+        
+        // Reset NAM-inspired neural network state
+        mHistoryIndex[i] = 0;
+        mDynamicGain[i] = 1.0f;
+        
+        for (int j = 0; j < 8; j++) {
+            mNeuralHistory[i][j] = 0.0f;
+        }
+        
+        for (int j = 0; j < 3; j++) {
+            mNeuralActivation[i][j] = 0.0f;
+        }
+        
+        for (int j = 0; j < 4; j++) {
+            mMemoryState[i][j] = 0.0f;
+        }
+    }
 }
 
 //-----------------------------------------------------------------------------
@@ -201,90 +344,120 @@ tresult PLUGIN_API PluginProcessor::process(ProcessData& data)
                         // Get the last point in the queue
                         paramQueue->getPoint(numPoints - 1, sampleOffset, value);
                         
-                        // Handle parameter changes
+                        // Handle parameter changes with logging
                         switch (paramQueue->getParameterId())
                         {
                             // Bypass Parameters
                             case kParamAmpBypassId:
+                                VST_LOG_PARAM_CHANGE("AmpBypass", mAmpBypass, value);
                                 mAmpBypass = value;
                                 break;
                             case kParamDistBypassId:
+                                VST_LOG_PARAM_CHANGE("DistBypass", mDistBypass, value);
                                 mDistBypass = value;
                                 break;
                             case kParamReverbBypassId:
+                                VST_LOG_PARAM_CHANGE("ReverbBypass", mReverbBypass, value);
                                 mReverbBypass = value;
                                 break;
                             case kParamDelayBypassId:
+                                VST_LOG_PARAM_CHANGE("DelayBypass", mDelayBypass, value);
                                 mDelayBypass = value;
                                 break;
                             case kParamModBypassId:
+                                VST_LOG_PARAM_CHANGE("ModBypass", mModBypass, value);
                                 mModBypass = value;
                                 break;
                                 
                             // Amp Section
                             case kParamGainId:
+                                VST_LOG_PARAM_CHANGE("Gain", mGain, value);
                                 mGain = value;
                                 break;
                             case kParamBassId:
+                                VST_LOG_PARAM_CHANGE("Bass", mBass, value);
                                 mBass = value;
                                 break;
                             case kParamMidId:
+                                VST_LOG_PARAM_CHANGE("Mid", mMid, value);
                                 mMid = value;
                                 break;
                             case kParamTrebleId:
+                                VST_LOG_PARAM_CHANGE("Treble", mTreble, value);
                                 mTreble = value;
                                 break;
                             case kParamPresenceId:
+                                VST_LOG_PARAM_CHANGE("Presence", mPresence, value);
                                 mPresence = value;
                                 break;
                             case kParamOutputLevelId:
+                                VST_LOG_PARAM_CHANGE("OutputLevel", mOutputLevel, value);
                                 mOutputLevel = value;
                                 break;
                                 
                             // Distortion Section
                             case kParamDistTypeId:
-                                mDistType = (int)(value * (kNumDistTypes - 1) + 0.5f);
+                                {
+                                    int oldType = mDistType;
+                                    mDistType = (int)(value * (kNumDistTypes - 1) + 0.5f);
+                                    VST_LOG_PARAM_CHANGE("DistType", (float)oldType, (float)mDistType);
+                                }
                                 break;
                             case kParamDistDriveId:
+                                VST_LOG_PARAM_CHANGE("DistDrive", mDistDrive, value);
                                 mDistDrive = value;
                                 break;
                                 
                             // Reverb Section
                             case kParamReverbMixId:
+                                VST_LOG_PARAM_CHANGE("ReverbMix", mReverbMix, value);
                                 mReverbMix = value;
                                 break;
                             case kParamReverbSizeId:
+                                VST_LOG_PARAM_CHANGE("ReverbSize", mReverbSize, value);
                                 mReverbSize = value;
                                 break;
                             case kParamReverbReverseId:
+                                VST_LOG_PARAM_CHANGE("ReverbReverse", mReverbReverse, value);
                                 mReverbReverse = value;
                                 break;
                             case kParamReverbShimmerId:
+                                VST_LOG_PARAM_CHANGE("ReverbShimmer", mReverbShimmer, value);
                                 mReverbShimmer = value;
                                 break;
                                 
                             // Delay Section
                             case kParamDelayMixId:
+                                VST_LOG_PARAM_CHANGE("DelayMix", mDelayMix, value);
                                 mDelayMix = value;
                                 break;
                             case kParamDelayTimeId:
+                                VST_LOG_PARAM_CHANGE("DelayTime", mDelayTime, value);
                                 mDelayTime = value;
                                 break;
                             case kParamDelayFeedbackId:
+                                VST_LOG_PARAM_CHANGE("DelayFeedback", mDelayFeedback, value);
                                 mDelayFeedback = value;
                                 break;
                             case kParamDelayReverseId:
+                                VST_LOG_PARAM_CHANGE("DelayReverse", mDelayReverse, value);
                                 mDelayReverse = value;
                                 break;
                                 
                             // Modulation Section
                             case kParamModTypeId:
-                                mModType = (int)(value * (kNumModTypes - 1) + 0.5f);
+                                {
+                                    int oldType = mModType;
+                                    mModType = (int)(value * (kNumModTypes - 1) + 0.5f);
+                                    VST_LOG_PARAM_CHANGE("ModType", (float)oldType, (float)mModType);
+                                }
                                 break;
                             case kParamModRateId:
+                                VST_LOG_PARAM_CHANGE("ModRate", mModRate, value);
                                 mModRate = value;
                                 break;
                             case kParamModDepthId:
+                                VST_LOG_PARAM_CHANGE("ModDepth", mModDepth, value);
                                 mModDepth = value;
                                 break;
                         }
@@ -315,38 +488,81 @@ tresult PLUGIN_API PluginProcessor::process(ProcessData& data)
         float* ptrIn = data.inputs[0].channelBuffers32[channel];
         float* ptrOut = data.outputs[0].channelBuffers32[channel];
         
-        // Process samples
+        // Process samples with logging
         for (int32 sample = 0; sample < data.numSamples; sample++)
         {
             float processed = ptrIn[sample];
+            float originalInput = processed;
+            
+            // Log input level and detect clipping
+            if (fabs(originalInput) > 0.95f) {
+                VST_LOG_CLIPPING("Input", originalInput, 0.95f);
+            }
             
             // Apply amp simulation and EQ (with bypass)
             if (mAmpBypass <= 0.5f) {
+                float preAmp = processed;
                 processed = processAmp(processed, channel);
+                VST_LOG_AUDIO("Amp", preAmp, processed, "channel_" + std::to_string(channel));
+                
+                if (fabs(processed) > 0.95f) {
+                    VST_LOG_CLIPPING("Amp", processed, 0.95f);
+                }
             }
             
             // Apply distortion (with bypass)
             if (mDistBypass <= 0.5f) {
+                float preDist = processed;
                 processed = processDistortion(processed);
+                VST_LOG_AUDIO("Distortion", preDist, processed, "type_" + std::to_string(mDistType));
+                
+                if (fabs(processed) > 0.95f) {
+                    VST_LOG_CLIPPING("Distortion", processed, 0.95f);
+                }
             }
             
             // Apply modulation (chorus/flanger/phaser) (with bypass)
             if (mModBypass <= 0.5f) {
+                float preMod = processed;
                 processed = processModulation(processed);
+                VST_LOG_AUDIO("Modulation", preMod, processed, "type_" + std::to_string(mModType));
+                
+                if (fabs(processed) > 0.95f) {
+                    VST_LOG_CLIPPING("Modulation", processed, 0.95f);
+                }
             }
             
             // Apply delay (with bypass)
             if (mDelayBypass <= 0.5f) {
+                float preDelay = processed;
                 processed = processDelay(processed);
+                VST_LOG_AUDIO("Delay", preDelay, processed, "reverse_" + std::to_string(mDelayReverse > 0.5f ? 1 : 0));
+                
+                if (fabs(processed) > 0.95f) {
+                    VST_LOG_CLIPPING("Delay", processed, 0.95f);
+                }
             }
             
             // Apply reverb (with bypass)
             if (mReverbBypass <= 0.5f) {
+                float preReverb = processed;
                 processed = processReverb(processed);
+                VST_LOG_AUDIO("Reverb", preReverb, processed, "shimmer_" + std::to_string(mReverbShimmer));
+                
+                if (fabs(processed) > 0.95f) {
+                    VST_LOG_CLIPPING("Reverb", processed, 0.95f);
+                }
             }
             
             // Apply output level (always applied, even when amp is bypassed)
+            float preOutput = processed;
             processed = processed * mOutputLevel;
+            VST_LOG_AUDIO("Output", preOutput, processed, "level_" + std::to_string(mOutputLevel));
+            
+            // Final clipping check
+            if (fabs(processed) > 0.98f) {
+                VST_LOG_CLIPPING("FinalOutput", processed, 0.98f);
+            }
             
             ptrOut[sample] = processed;
         }
@@ -540,60 +756,188 @@ uint32 PLUGIN_API PluginProcessor::getLatencySamples()
 //-----------------------------------------------------------------------------
 float PluginProcessor::processAmp(float input, int channel)
 {
-    // EXTREME noise gate to eliminate all low-level interference
-    float noiseGateThreshold = 0.005f; // Much higher threshold
-    if (fabs(input) < noiseGateThreshold) {
-        input = 0.0f;
+    // NAM-inspired neural amp modeling approach
+    
+    // ===== STAGE 1: INPUT HISTORY COLLECTION =====
+    // Store input history for neural network processing (like NAM's temporal modeling)
+    mNeuralHistory[channel][mHistoryIndex[channel]] = input;
+    mHistoryIndex[channel] = (mHistoryIndex[channel] + 1) % 8;
+    
+    // ===== STAGE 2: DYNAMIC GAIN ADAPTATION =====
+    // Simulate amp's dynamic response to input level (like NAM's level-dependent modeling)
+    float inputLevel = fabs(input);
+    float targetGain = 1.0f + mGain * 2.0f; // Base gain from user control
+    
+    // Dynamic gain adjustment based on input level (amp compression/expansion)
+    if (inputLevel > 0.1f) {
+        targetGain *= (1.0f - (inputLevel - 0.1f) * 0.3f); // Compression at high levels
+    } else {
+        targetGain *= (1.0f + (0.1f - inputLevel) * 0.2f); // Slight expansion at low levels
     }
     
-    // Apply gain with MUCH reduced range to prevent ANY harsh artifacts
-    float gain = 1.0f + mGain * 6.0f; // Drastically reduced from 12x to 6x gain range
-    float amplified = input * gain;
+    // Smooth gain changes to avoid artifacts
+    mDynamicGain[channel] += (targetGain - mDynamicGain[channel]) * 0.01f;
     
-    // ELIMINATE all possible sources of digital artifacts
-    // Clamp to prevent any overflow that could cause buzzing
-    if (amplified > 0.8f) amplified = 0.8f;
-    if (amplified < -0.8f) amplified = -0.8f;
+    // ===== STAGE 3: NEURAL NETWORK PROCESSING =====
+    // Simplified 3-layer neural network inspired by NAM architecture
     
-    // Apply EXTREME 7-stage anti-aliasing cascade
-    static float lpFilter[2] = {0.0f, 0.0f};
-    static float secondaryLPF[2] = {0.0f, 0.0f};
-    static float tertiaryLPF[2] = {0.0f, 0.0f};
-    static float quaternaryLPF[2] = {0.0f, 0.0f};
-    static float quinaryLPF[2] = {0.0f, 0.0f};
-    static float senaryLPF[2] = {0.0f, 0.0f};
-    static float septenaryLPF[2] = {0.0f, 0.0f};
+    // Layer 1: Input processing with history
+    float layer1_sum = mNeuralBias[0];
+    for (int i = 0; i < 8; i++) {
+        int histIdx = (mHistoryIndex[channel] + i) % 8;
+        layer1_sum += mNeuralHistory[channel][histIdx] * mNeuralWeights[0][i];
+    }
+    mNeuralActivation[channel][0] = tanh(layer1_sum); // Activation function
     
-    // Stage 1: Ultra-aggressive initial filtering
-    float cutoff1 = 0.8f; // Extremely aggressive
-    lpFilter[channel] = lpFilter[channel] * (1.0f - cutoff1) + amplified * cutoff1;
+    // Layer 2: Nonlinear processing (main amp character)
+    float layer2_input = mNeuralActivation[channel][0] * mDynamicGain[channel];
+    float layer2_sum = mNeuralBias[1];
     
-    // Stage 2: Continue aggressive filtering
-    float cutoff2 = 0.7f;
-    secondaryLPF[channel] = secondaryLPF[channel] * (1.0f - cutoff2) + lpFilter[channel] * cutoff2;
+    // Use current and previous activations for temporal modeling
+    layer2_sum += layer2_input * mNeuralWeights[1][0];
+    layer2_sum += mMemoryState[channel][0] * mNeuralWeights[1][1]; // Memory feedback
+    layer2_sum += mMemoryState[channel][1] * mNeuralWeights[1][2];
+    layer2_sum += mMemoryState[channel][2] * mNeuralWeights[1][3];
+    layer2_sum += layer2_input * layer2_input * mNeuralWeights[1][4]; // Nonlinear term
+    layer2_sum += layer2_input * mMemoryState[channel][0] * mNeuralWeights[1][5]; // Cross term
+    layer2_sum += sin(layer2_input * 3.14159f) * mNeuralWeights[1][6] * 0.1f; // Harmonic content
+    layer2_sum += layer2_input * fabs(layer2_input) * mNeuralWeights[1][7] * 0.5f; // Asymmetric term
     
-    // Stage 3: More filtering
-    float cutoff3 = 0.6f;
-    tertiaryLPF[channel] = tertiaryLPF[channel] * (1.0f - cutoff3) + secondaryLPF[channel] * cutoff3;
+    mNeuralActivation[channel][1] = tanh(layer2_sum * 0.8f); // Prevent saturation
     
-    // Stage 4: Even more filtering
-    float cutoff4 = 0.5f;
-    quaternaryLPF[channel] = quaternaryLPF[channel] * (1.0f - cutoff4) + tertiaryLPF[channel] * cutoff4;
+    // Layer 3: Output shaping and filtering
+    float layer3_sum = mNeuralBias[2];
+    layer3_sum += mNeuralActivation[channel][1] * mNeuralWeights[2][0];
+    layer3_sum += mNeuralActivation[channel][0] * mNeuralWeights[2][1]; // Skip connection
+    layer3_sum += mMemoryState[channel][3] * mNeuralWeights[2][2]; // Long-term memory
+    layer3_sum += input * mNeuralWeights[2][3] * 0.1f; // Dry signal blend
     
-    // Stage 5: Continue the cascade
-    float cutoff5 = 0.4f;
-    quinaryLPF[channel] = quinaryLPF[channel] * (1.0f - cutoff5) + quaternaryLPF[channel] * cutoff5;
+    float neuralOutput = tanh(layer3_sum);
     
-    // Stage 6: More smoothing
-    float cutoff6 = 0.3f;
-    senaryLPF[channel] = senaryLPF[channel] * (1.0f - cutoff6) + quinaryLPF[channel] * cutoff6;
+    // ===== STAGE 4: MEMORY STATE UPDATE =====
+    // Update memory states for next sample (amp's temporal behavior)
+    mMemoryState[channel][3] = mMemoryState[channel][2];
+    mMemoryState[channel][2] = mMemoryState[channel][1];
+    mMemoryState[channel][1] = mMemoryState[channel][0];
+    mMemoryState[channel][0] = mNeuralActivation[channel][1];
     
-    // Stage 7: Final ultra-smooth stage
-    float cutoff7 = 0.2f;
-    septenaryLPF[channel] = septenaryLPF[channel] * (1.0f - cutoff7) + senaryLPF[channel] * cutoff7;
+    // ===== STAGE 5: FINAL PROCESSING =====
+    // Apply EQ and final output scaling
+    float eqOutput = processEQ(neuralOutput, channel);
     
-    // Apply EQ to the ultra-filtered signal
-    return processEQ(septenaryLPF[channel], channel);
+    // Conservative output scaling
+    return eqOutput * 0.8f;
+}
+
+//-----------------------------------------------------------------------------
+// Tone Stack Simulation (Classic Guitar Amp EQ)
+//-----------------------------------------------------------------------------
+float PluginProcessor::processToneStack(float input, int channel)
+{
+    // Classic guitar amp tone stack (based on Fender/Marshall circuits)
+    // This simulates the interactive bass/mid/treble controls found in tube amps
+    
+    // ===== BASS CONTROL (Low Shelf Filter) =====
+    // Bass control affects low frequencies (80-300Hz)
+    float bassFreq = 0.08f; // ~150Hz equivalent at 44.1kHz
+    float bassGain = 0.3f + mBass * 1.4f; // 0.3x to 1.7x gain range
+    
+    // Low shelf filter implementation
+    mToneStackLowpass[channel] = mToneStackLowpass[channel] * (1.0f - bassFreq) + input * bassFreq;
+    float bassComponent = mToneStackLowpass[channel] * bassGain;
+    float bassProcessed = input * (1.0f - bassFreq) + bassComponent * bassFreq;
+    
+    // ===== TREBLE CONTROL (High Shelf Filter) =====
+    // Treble control affects high frequencies (3kHz+)
+    float trebleFreq = 0.25f; // ~3kHz equivalent at 44.1kHz
+    float trebleGain = 0.4f + mTreble * 1.2f; // 0.4x to 1.6x gain range
+    
+    // High shelf filter implementation
+    mToneStackHighpass[channel] = mToneStackHighpass[channel] * (1.0f - trebleFreq) + bassProcessed * trebleFreq;
+    float trebleComponent = (bassProcessed - mToneStackHighpass[channel]) * trebleGain;
+    float trebleProcessed = bassProcessed * (1.0f - trebleFreq) + (mToneStackHighpass[channel] + trebleComponent) * trebleFreq;
+    
+    // ===== MID CONTROL (Bandpass/Notch Filter) =====
+    // Mid control affects midrange frequencies (300Hz-3kHz)
+    float midFreq = 0.15f; // ~1kHz equivalent at 44.1kHz
+    float midGain = 0.5f + (mMid - 0.5f) * 1.0f; // 0.0x to 1.0x range (can cut or boost)
+    
+    // Bandpass filter for midrange
+    mToneStackMidband[channel] = mToneStackMidband[channel] * (1.0f - midFreq) + trebleProcessed * midFreq;
+    float midComponent = (trebleProcessed - mToneStackMidband[channel]) * midGain;
+    float midProcessed = trebleProcessed * 0.7f + midComponent * 0.3f;
+    
+    // ===== PRESENCE CONTROL (High-Mid Boost) =====
+    // Presence adds clarity and bite in the upper midrange (1-5kHz)
+    float presenceAmount = mPresence * 0.3f; // Subtle effect
+    float presenceFreq = 0.18f; // ~1.5kHz equivalent
+    
+    // Simple high-mid boost
+    float presenceFiltered = midProcessed - mToneStackMidband[channel] * 0.5f;
+    float presenceOutput = midProcessed + presenceFiltered * presenceAmount;
+    
+    // ===== TONE STACK INTERACTION =====
+    // Real guitar amp tone stacks have interactive controls - when you turn up bass, it affects mids, etc.
+    float interaction = (mBass + mTreble) * 0.1f; // Subtle interaction effect
+    float interactionGain = 1.0f - interaction * 0.2f; // Slight mid scoop when bass/treble are high
+    
+    float finalToneStack = presenceOutput * interactionGain;
+    
+    // Gentle saturation to simulate tube tone stack loading
+    finalToneStack = tanh(finalToneStack * 1.1f) * 0.95f;
+    
+    return finalToneStack;
+}
+
+//-----------------------------------------------------------------------------
+// Cabinet and Speaker Simulation
+//-----------------------------------------------------------------------------
+float PluginProcessor::processCabinetSimulation(float input, int channel)
+{
+    // Simulate a 4x12 guitar cabinet with Celestion-style speakers
+    // This includes cabinet resonance, speaker frequency response, and room acoustics
+    
+    // ===== CABINET RESONANCE =====
+    // Guitar cabinets have resonant frequencies that color the sound
+    float cabinetResonanceFreq = 0.06f; // ~100Hz cabinet resonance
+    mSpeakerResonance[channel] = mSpeakerResonance[channel] * (1.0f - cabinetResonanceFreq) + input * cabinetResonanceFreq;
+    float resonanceBoost = mSpeakerResonance[channel] * 0.15f; // Subtle low-end thump
+    float resonanceProcessed = input + resonanceBoost;
+    
+    // ===== SPEAKER FREQUENCY RESPONSE =====
+    // Multi-stage filtering to simulate speaker characteristics
+    
+    // Stage 1: Low-frequency rolloff (speakers don't reproduce very low frequencies well)
+    float lowRolloffFreq = 0.04f; // ~80Hz rolloff
+    mCabinetFilter1[channel] = mCabinetFilter1[channel] * (1.0f - lowRolloffFreq) + resonanceProcessed * lowRolloffFreq;
+    float stage1 = resonanceProcessed - mCabinetFilter1[channel] * 0.3f;
+    
+    // Stage 2: Mid-frequency presence (speakers have a presence peak around 2-4kHz)
+    float presencePeakFreq = 0.20f; // ~2.5kHz presence peak
+    mCabinetFilter2[channel] = mCabinetFilter2[channel] * (1.0f - presencePeakFreq) + stage1 * presencePeakFreq;
+    float presencePeak = (stage1 - mCabinetFilter2[channel]) * 0.2f; // Subtle presence boost
+    float stage2 = stage1 + presencePeak;
+    
+    // Stage 3: High-frequency rolloff (speakers naturally roll off high frequencies)
+    float highRolloffFreq = 0.35f; // ~5kHz rolloff starts
+    mCabinetFilter3[channel] = mCabinetFilter3[channel] * (1.0f - highRolloffFreq) + stage2 * highRolloffFreq;
+    float stage3 = mCabinetFilter3[channel]; // Smooth high-frequency rolloff
+    
+    // ===== SPEAKER SATURATION =====
+    // Speakers add subtle compression and harmonic distortion at high levels
+    float speakerLevel = fabs(stage3);
+    float speakerSaturation = 1.0f / (1.0f + speakerLevel * 0.5f); // Gentle compression
+    float speakerOutput = stage3 * speakerSaturation;
+    
+    // Add subtle speaker cone resonance (very subtle harmonic content)
+    float coneResonance = sin(speakerOutput * 2.5f) * 0.008f * speakerLevel;
+    speakerOutput += coneResonance;
+    
+    // ===== CABINET AIR MOVEMENT =====
+    // Simulate the air movement and room acoustics of a guitar cabinet
+    float airMovement = tanh(speakerOutput * 0.9f) * 1.05f; // Subtle air compression
+    
+    return airMovement * 0.85f; // Conservative output level
 }
 
 //-----------------------------------------------------------------------------
@@ -601,98 +945,25 @@ float PluginProcessor::processAmp(float input, int channel)
 //-----------------------------------------------------------------------------
 float PluginProcessor::processEQ(float input, int channel)
 {
-    // REDESIGNED EQ with reduced bass and enhanced high/mid frequencies
+    // Simple, clean EQ without complex filtering or mixing
     
-    // Apply noise gate to EQ input
-    if (fabs(input) < 0.001f) {
-        input = 0.0f;
-    }
+    // Simple bass adjustment (just multiply by gain)
+    float bassGain = 0.5f + mBass * 1.0f; // 0.5x to 1.5x
     
-    // Bass (low shelf around 80Hz) - REDUCED bass response
-    float bassFreq = 80.0f / mSampleRate; // Moved down from 100Hz to 80Hz
-    float bassAlpha = bassFreq / (bassFreq + 0.5f);
-    float bassGain = 0.7f + (mBass * 2.0f - 1.0f) * 2.0f; // Reduced base gain and range
+    // Simple treble adjustment (just multiply by gain)
+    float trebleGain = 0.5f + mTreble * 1.0f; // 0.5x to 1.5x
     
-    // Clamp bass gain to reduce bass buildup
-    if (bassGain > 1.5f) bassGain = 1.5f;
-    if (bassGain < 0.3f) bassGain = 0.3f; // Allow more bass cut
+    // Simple mid adjustment
+    float midGain = 0.5f + mMid * 1.0f; // 0.5x to 1.5x
     
-    mBassFilter[channel][0] = mBassFilter[channel][0] + bassAlpha * (input - mBassFilter[channel][0]);
-    float bassOut = mBassFilter[channel][0] * bassGain;
+    // Apply simple gain adjustments without complex filtering
+    float output = input * bassGain * midGain * trebleGain;
     
-    // Apply anti-aliasing to bass output
-    static float bassAAFilter[2] = {0.0f, 0.0f};
-    bassAAFilter[channel] = bassAAFilter[channel] * 0.7f + bassOut * 0.3f;
-    bassOut = bassAAFilter[channel];
+    // Simple limiting to prevent clipping
+    if (output > 1.0f) output = 1.0f;
+    if (output < -1.0f) output = -1.0f;
     
-    // Mid (peak around 1.5kHz) - ENHANCED mid response
-    float midFreq = 1500.0f / mSampleRate; // Moved up from 1kHz to 1.5kHz for more presence
-    float midAlpha = midFreq / (midFreq + 0.5f);
-    float midGain = 1.2f + (mMid * 2.0f - 1.0f) * 4.0f; // Increased base gain and range
-    
-    // Allow more mid boost
-    if (midGain > 3.0f) midGain = 3.0f;
-    if (midGain < 0.5f) midGain = 0.5f;
-    
-    mMidFilter[channel][0] = mMidFilter[channel][0] + midAlpha * (input - mMidFilter[channel][0]);
-    float midOut = (input - mMidFilter[channel][0]) * midGain;
-    
-    // Apply anti-aliasing to mid output
-    static float midAAFilter[2] = {0.0f, 0.0f};
-    midAAFilter[channel] = midAAFilter[channel] * 0.7f + midOut * 0.3f;
-    midOut = midAAFilter[channel];
-    
-    // Treble (high shelf around 3kHz) - ENHANCED treble response
-    float trebleFreq = 3000.0f / mSampleRate; // Back to 3kHz for more brightness
-    float trebleAlpha = trebleFreq / (trebleFreq + 0.5f);
-    float trebleGain = 1.3f + (mTreble * 2.0f - 1.0f) * 4.0f; // Increased base gain and range
-    
-    // Allow more treble boost
-    if (trebleGain > 3.5f) trebleGain = 3.5f;
-    if (trebleGain < 0.6f) trebleGain = 0.6f;
-    
-    mTrebleFilter[channel][0] = mTrebleFilter[channel][0] + trebleAlpha * (input - mTrebleFilter[channel][0]);
-    float trebleOut = (input - mTrebleFilter[channel][0]) * trebleGain;
-    
-    // Apply controlled anti-aliasing to treble output
-    static float trebleAAFilter1[2] = {0.0f, 0.0f};
-    static float trebleAAFilter2[2] = {0.0f, 0.0f};
-    trebleAAFilter1[channel] = trebleAAFilter1[channel] * 0.8f + trebleOut * 0.2f;
-    trebleAAFilter2[channel] = trebleAAFilter2[channel] * 0.7f + trebleAAFilter1[channel] * 0.3f;
-    trebleOut = trebleAAFilter2[channel];
-    
-    // Presence (high shelf around 5kHz) - ENHANCED presence
-    float presenceFreq = 5000.0f / mSampleRate; // Moved up from 4kHz to 5kHz
-    float presenceAlpha = presenceFreq / (presenceFreq + 0.5f);
-    float presenceGain = 1.4f + (mPresence * 2.0f - 1.0f) * 3.0f; // Increased base gain and range
-    
-    // Allow more presence boost
-    if (presenceGain > 3.0f) presenceGain = 3.0f;
-    if (presenceGain < 0.7f) presenceGain = 0.7f;
-    
-    mPresenceFilter[channel][0] = mPresenceFilter[channel][0] + presenceAlpha * (input - mPresenceFilter[channel][0]);
-    float presenceOut = (input - mPresenceFilter[channel][0]) * presenceGain;
-    
-    // Apply controlled anti-aliasing to presence output
-    static float presenceAAFilter1[2] = {0.0f, 0.0f};
-    static float presenceAAFilter2[2] = {0.0f, 0.0f};
-    presenceAAFilter1[channel] = presenceAAFilter1[channel] * 0.8f + presenceOut * 0.2f;
-    presenceAAFilter2[channel] = presenceAAFilter2[channel] * 0.7f + presenceAAFilter1[channel] * 0.3f;
-    presenceOut = presenceAAFilter2[channel];
-    
-    // Sum all bands with enhanced high/mid frequencies
-    float eqOutput = (bassOut * 0.6f + midOut * 1.2f + trebleOut * 1.3f + presenceOut * 1.1f) * 0.7f;
-    
-    // Final anti-aliasing stage for the entire EQ output
-    static float finalEQFilter[2] = {0.0f, 0.0f};
-    finalEQFilter[channel] = finalEQFilter[channel] * 0.8f + eqOutput * 0.2f;
-    
-    // Clamp final output to prevent any overflow
-    float finalOutput = finalEQFilter[channel];
-    if (finalOutput > 0.8f) finalOutput = 0.8f;
-    if (finalOutput < -0.8f) finalOutput = -0.8f;
-    
-    return finalOutput;
+    return output;
 }
 
 //-----------------------------------------------------------------------------
@@ -700,110 +971,38 @@ float PluginProcessor::processEQ(float input, int channel)
 //-----------------------------------------------------------------------------
 float PluginProcessor::processDistortion(float input)
 {
-    // EXTREME noise gate for distortion input
-    if (fabs(input) < 0.003f) {
-        input = 0.0f;
-    }
+    // Simple, clean distortion without noise gates or complex processing
     
-    // DRASTICALLY reduced drive range to eliminate ALL buzzing sources
-    float drive = mDistDrive * 3.0f + 1.0f;  // Reduced from 12x to 3x maximum drive
-    
-    // Pre-gain with HARD limiting to prevent ANY overflow
-    float preGain = input * drive;
-    if (preGain > 0.5f) preGain = 0.5f;
-    if (preGain < -0.5f) preGain = -0.5f;
+    // Simple drive control
+    float drive = 1.0f + mDistDrive * 4.0f; // 1x to 5x drive
+    float driven = input * drive;
     
     float distorted = 0.0f;
     
-    // COMPLETELY REDESIGNED distortion algorithms to eliminate buzzing
+    // Simple, clean distortion algorithms
     switch (mDistType)
     {
         case kDistClean:
-            // Ultra-gentle soft clipping
-            distorted = tanh(preGain * 0.1f); // Extremely reduced gain
+            // Clean: just gentle tanh saturation
+            distorted = tanh(driven * 0.8f);
             break;
             
         case kDistCrunch:
-            // Very gentle saturation
-            distorted = tanh(preGain * 0.2f); // Much more gentle
-            // Remove ALL asymmetry that could cause artifacts
+            // Crunch: moderate tanh saturation
+            distorted = tanh(driven * 1.2f) * 0.9f;
             break;
             
         case kDistFuzz:
-            // AGGRESSIVE FUZZ with controlled aliasing
-            // Hard clipping for aggressive fuzz character
-            if (preGain > 0.4f) {
-                distorted = 0.4f + tanh((preGain - 0.4f) * 8.0f) * 0.3f; // Aggressive clipping above threshold
-            } else if (preGain < -0.4f) {
-                distorted = -0.4f + tanh((preGain + 0.4f) * 8.0f) * 0.3f; // Aggressive clipping below threshold
-            } else {
-                // Aggressive cubic distortion in the middle range
-                distorted = preGain + (preGain * preGain * preGain) * 2.0f;
-            }
-            
-            // Add controlled octave-up effect for fuzz character
-            static float fuzzOctavePhase = 0.0f;
-            fuzzOctavePhase += TWO_PI * 2.0f / mSampleRate; // Double frequency
-            if (fuzzOctavePhase >= TWO_PI) fuzzOctavePhase -= TWO_PI;
-            
-            float octaveEffect = sin(fuzzOctavePhase) * 0.15f * fabs(distorted); // Controlled octave-up
-            distorted += octaveEffect;
-            
-            // Apply controlled smoothing (less than before for more aggression)
-            static float fuzzSmoother1 = 0.0f;
-            static float fuzzSmoother2 = 0.0f;
-            
-            fuzzSmoother1 = fuzzSmoother1 * 0.7f + distorted * 0.3f; // Less smoothing
-            fuzzSmoother2 = fuzzSmoother2 * 0.6f + fuzzSmoother1 * 0.4f; // Less smoothing
-            
-            distorted = fuzzSmoother2;
+            // Fuzz: harder tanh saturation
+            distorted = tanh(driven * 1.8f) * 0.8f;
             break;
     }
     
-    // ELIMINATE post-gain that could cause artifacts
-    float postGain = 0.8f; // Fixed, gentle post-gain
+    // Simple output limiting
+    if (distorted > 1.0f) distorted = 1.0f;
+    if (distorted < -1.0f) distorted = -1.0f;
     
-    // EXTREME 8-stage anti-aliasing cascade to eliminate ALL possible buzzing
-    static float antiAliasingLPF1 = 0.0f;
-    static float antiAliasingLPF2 = 0.0f;
-    static float antiAliasingLPF3 = 0.0f;
-    static float antiAliasingLPF4 = 0.0f;
-    static float antiAliasingLPF5 = 0.0f;
-    static float antiAliasingLPF6 = 0.0f;
-    static float antiAliasingLPF7 = 0.0f;
-    static float antiAliasingLPF8 = 0.0f;
-    
-    // Eight-stage EXTREME filtering cascade
-    float lpfCutoff1 = 0.95f; // Ultra-aggressive
-    antiAliasingLPF1 = antiAliasingLPF1 * (1.0f - lpfCutoff1) + distorted * lpfCutoff1;
-    
-    float lpfCutoff2 = 0.9f;
-    antiAliasingLPF2 = antiAliasingLPF2 * (1.0f - lpfCutoff2) + antiAliasingLPF1 * lpfCutoff2;
-    
-    float lpfCutoff3 = 0.8f;
-    antiAliasingLPF3 = antiAliasingLPF3 * (1.0f - lpfCutoff3) + antiAliasingLPF2 * lpfCutoff3;
-    
-    float lpfCutoff4 = 0.7f;
-    antiAliasingLPF4 = antiAliasingLPF4 * (1.0f - lpfCutoff4) + antiAliasingLPF3 * lpfCutoff4;
-    
-    float lpfCutoff5 = 0.6f;
-    antiAliasingLPF5 = antiAliasingLPF5 * (1.0f - lpfCutoff5) + antiAliasingLPF4 * lpfCutoff5;
-    
-    float lpfCutoff6 = 0.5f;
-    antiAliasingLPF6 = antiAliasingLPF6 * (1.0f - lpfCutoff6) + antiAliasingLPF5 * lpfCutoff6;
-    
-    float lpfCutoff7 = 0.4f;
-    antiAliasingLPF7 = antiAliasingLPF7 * (1.0f - lpfCutoff7) + antiAliasingLPF6 * lpfCutoff7;
-    
-    float lpfCutoff8 = 0.3f; // Final ultra-smooth stage
-    antiAliasingLPF8 = antiAliasingLPF8 * (1.0f - lpfCutoff8) + antiAliasingLPF7 * lpfCutoff8;
-    
-    // Final output with hard limiting to prevent ANY overflow
-    float finalOutput = antiAliasingLPF8 * postGain;
-    if (finalOutput > 0.6f) finalOutput = 0.6f;
-    if (finalOutput < -0.6f) finalOutput = -0.6f;
-    
-    return finalOutput;
+    return distorted * 0.7f; // Conservative output level
 }
 
 //-----------------------------------------------------------------------------
@@ -1015,145 +1214,132 @@ float PluginProcessor::processModulation(float input)
         return input; // Skip processing if depth is too low
     }
     
-    // Apply noise gate to modulation input
-    if (fabs(input) < 0.002f) {
-        input = 0.0f;
+    // Apply noise gate with hysteresis - using member variables
+    if (fabs(input) < 0.0003f && mModGateState == 0.0f) {
+        return input;
+    } else if (fabs(input) > 0.0005f) {
+        mModGateState = 1.0f;
+    } else if (fabs(input) < 0.0003f) {
+        mModGateState = 0.0f;
+        return input;
     }
     
-    // Calculate modulation rate with smoother transitions
-    float rate = 0.1f + mModRate * 4.9f; // Reduced from 10Hz to 5Hz max to avoid artifacts
-    float phase = mModPhase;
+    // More conservative modulation rate
+    float rate = 0.1f + mModRate * 1.0f; // Further reduced max rate
     
-    // Update phase with smoother increment
+    // Update phase smoothly
     mModPhase += rate / mSampleRate;
     if (mModPhase >= 1.0f) {
         mModPhase -= 1.0f;
     }
     
-    // Calculate LFO value with smoother sine wave
-    float lfo = 0.5f + 0.5f * sin(TWO_PI * phase);
+    // Calculate LFO value with better waveform
+    float lfo = 0.5f + 0.5f * sin(TWO_PI * mModPhase);
     
-    // Apply EXTREME smoothing to LFO to prevent artifacts
-    static float lfoSmoother = 0.5f;
-    lfoSmoother = lfoSmoother * 0.95f + lfo * 0.05f; // Very smooth LFO
-    lfo = lfoSmoother;
+    // Better LFO smoothing to prevent zipper noise - using member variables
+    mLfoSmoother = mLfoSmoother * 0.95f + lfo * 0.05f; // More smoothing
+    lfo = mLfoSmoother;
     
-    // Apply different modulation types with MUCH reduced intensity
-    float modulated = 0.0f;
+    // Apply different modulation types with much better algorithms
+    float modulated = input;
     
     switch (mModType)
     {
         case kModChorus:
-            // Chorus: MUCH gentler delay modulation
+            // Improved chorus with interpolation and feedback control
             {
-                // Calculate delay time (3-8ms) - reduced range
+                // Calculate delay time (3-8ms) - better range for chorus
                 float delayMs = 3.0f + lfo * 5.0f;
-                int delaySamples = (int)(delayMs * mSampleRate / 1000.0f);
+                float delaySamplesFloat = delayMs * mSampleRate / 1000.0f;
+                int delaySamples = (int)delaySamplesFloat;
+                float fraction = delaySamplesFloat - delaySamples;
                 
                 // Ensure delay samples is within bounds
-                if (delaySamples >= mDelayBufferLength) {
-                    delaySamples = mDelayBufferLength - 1;
-                }
+                delaySamples = std::max(1, std::min(delaySamples, mDelayBufferLength - 2));
                 
-                // Read from delay buffer with bounds checking
+                // Read from delay buffer with linear interpolation
                 int readPos = mDelayBufferPos - delaySamples;
-                if (readPos < 0) {
-                    readPos += mDelayBufferLength;
-                }
+                if (readPos < 0) readPos += mDelayBufferLength;
+                int nextPos = (readPos + 1) % mDelayBufferLength;
                 
-                float delayed = mDelayBuffer[readPos];
+                float delayed = mDelayBuffer[readPos] * (1.0f - fraction) +
+                               mDelayBuffer[nextPos] * fraction;
                 
-                // Apply anti-aliasing to delayed signal
-                static float chorusAAFilter = 0.0f;
-                chorusAAFilter = chorusAAFilter * 0.8f + delayed * 0.2f;
-                delayed = chorusAAFilter;
-                
-                // Mix with original - MUCH gentler mixing
-                float mixAmount = mModDepth * 0.3f; // Reduced from 0.5f to 0.3f
-                modulated = input * (1.0f - mixAmount) + delayed * mixAmount;
+                // Conservative mixing with proper balance
+                float mixAmount = mModDepth * 0.15f; // Slightly increased but still conservative
+                modulated = input * (1.0f - mixAmount * 0.5f) + delayed * mixAmount;
             }
             break;
             
         case kModFlanger:
-            // Flanger: MUCH gentler delay modulation
+            // Improved flanger with feedback and better delay range
             {
-                // Calculate delay time (0.5-3ms) - reduced range
-                float delayMs = 0.5f + lfo * 2.5f;
-                int delaySamples = (int)(delayMs * mSampleRate / 1000.0f);
+                // Calculate delay time (0.7-2.5ms) - better flanger range
+                float delayMs = 0.7f + lfo * 1.8f;
+                float delaySamplesFloat = delayMs * mSampleRate / 1000.0f;
+                int delaySamples = (int)delaySamplesFloat;
+                float fraction = delaySamplesFloat - delaySamples;
                 
                 // Ensure delay samples is within bounds
-                if (delaySamples >= mDelayBufferLength) {
-                    delaySamples = mDelayBufferLength - 1;
-                }
-                if (delaySamples < 1) {
-                    delaySamples = 1;
-                }
+                delaySamples = std::max(1, std::min(delaySamples, mDelayBufferLength - 2));
                 
-                // Read from delay buffer with bounds checking
+                // Read from delay buffer with interpolation
                 int readPos = mDelayBufferPos - delaySamples;
-                if (readPos < 0) {
-                    readPos += mDelayBufferLength;
-                }
+                if (readPos < 0) readPos += mDelayBufferLength;
+                int nextPos = (readPos + 1) % mDelayBufferLength;
                 
-                float delayed = mDelayBuffer[readPos];
+                float delayed = mDelayBuffer[readPos] * (1.0f - fraction) +
+                               mDelayBuffer[nextPos] * fraction;
                 
-                // Apply anti-aliasing to delayed signal
-                static float flangerAAFilter = 0.0f;
-                flangerAAFilter = flangerAAFilter * 0.8f + delayed * 0.2f;
-                delayed = flangerAAFilter;
+                // Add feedback for more pronounced flanger effect - using member variables
+                mFlangerFeedback = mFlangerFeedback * 0.3f + delayed * 0.7f;
+                delayed = delayed + mFlangerFeedback * 0.2f;
                 
-                // Mix with original - MUCH gentler flanging
-                float mixAmount = mModDepth * 0.2f; // Much reduced intensity
-                modulated = input - delayed * mixAmount;
+                // Conservative flanging with inverted phase for sweep effect
+                float mixAmount = mModDepth * 0.12f;
+                modulated = input + delayed * mixAmount * (lfo > 0.5f ? 1.0f : -1.0f);
             }
             break;
             
         case kModPhaser:
-            // Phaser: COMPLETELY REDESIGNED to eliminate buzzing
+            // Much improved phaser with multiple allpass stages - using member variables
             {
-                // Use much lower frequency range to avoid buzz frequencies
-                float allpassFreq = 100.0f + lfo * 1000.0f; // Reduced from 200-4200Hz to 100-1100Hz
-                float allpassAlpha = allpassFreq / (allpassFreq + mSampleRate);
+                // Modulated allpass frequency
+                float modAmount = mModDepth * 0.08f * lfo;
+                float alpha = 0.06f + modAmount * 0.04f; // Better range
                 
-                // Clamp alpha to prevent instability
-                if (allpassAlpha > 0.9f) allpassAlpha = 0.9f;
-                if (allpassAlpha < 0.1f) allpassAlpha = 0.1f;
+                // Clamp alpha for stability
+                alpha = std::max(0.03f, std::min(0.12f, alpha));
                 
-                // Apply ONLY 2 stages instead of 4 to reduce artifacts
-                float phased = input;
-                static float phaserState1 = 0.0f;
-                static float phaserState2 = 0.0f;
+                // Four-stage allpass filter cascade - using member variables
+                mPhaserStage1 = mPhaserStage1 * (1.0f - alpha) + input * alpha;
+                float stage1Out = input - mPhaserStage1;
                 
-                // Stage 1 with extreme smoothing
-                float delayed1 = phaserState1;
-                phased = allpassAlpha * (phased + delayed1) - delayed1;
-                phaserState1 = phaserState1 * 0.9f + phased * 0.1f; // Extreme smoothing
+                mPhaserStage2 = mPhaserStage2 * (1.0f - alpha) + stage1Out * alpha;
+                float stage2Out = stage1Out - mPhaserStage2;
                 
-                // Stage 2 with extreme smoothing
-                float delayed2 = phaserState2;
-                phased = allpassAlpha * (phased + delayed2) - delayed2;
-                phaserState2 = phaserState2 * 0.9f + phased * 0.1f; // Extreme smoothing
+                mPhaserStage3 = mPhaserStage3 * (1.0f - alpha) + stage2Out * alpha;
+                float stage3Out = stage2Out - mPhaserStage3;
                 
-                // Apply final anti-aliasing to phaser output
-                static float phaserAAFilter = 0.0f;
-                phaserAAFilter = phaserAAFilter * 0.8f + phased * 0.2f;
-                phased = phaserAAFilter;
+                mPhaserStage4 = mPhaserStage4 * (1.0f - alpha) + stage3Out * alpha;
+                float stage4Out = stage3Out - mPhaserStage4;
                 
-                // Mix with original - MUCH gentler phasing
-                float mixAmount = mModDepth * 0.25f; // Reduced intensity
-                modulated = input * (1.0f - mixAmount) + phased * mixAmount;
+                // Mix with feedback for more pronounced effect - using member variables
+                mPhaserFeedback = mPhaserFeedback * 0.7f + stage4Out * 0.3f;
+                
+                float mixAmount = mModDepth * 0.08f;
+                modulated = input * (1.0f - mixAmount) +
+                           (stage4Out + mPhaserFeedback * 0.15f) * mixAmount;
             }
             break;
     }
     
-    // Apply final anti-aliasing to entire modulation output
-    static float modAAFilter = 0.0f;
-    modAAFilter = modAAFilter * 0.85f + modulated * 0.15f;
+    // Two-stage smoothing for better quality - using member variables
+    mModSmoothFilter1 = mModSmoothFilter1 * 0.85f + modulated * 0.15f;
+    mModSmoothFilter2 = mModSmoothFilter2 * 0.9f + mModSmoothFilter1 * 0.1f;
     
-    // Hard limit to prevent any overflow
-    float finalOutput = modAAFilter;
-    if (finalOutput > 0.8f) finalOutput = 0.8f;
-    if (finalOutput < -0.8f) finalOutput = -0.8f;
+    // Gentle tanh limiting for musical saturation
+    float finalOutput = tanh(mModSmoothFilter2 * 0.95f) * 1.02f;
     
     return finalOutput;
 }
@@ -1162,12 +1348,12 @@ float PluginProcessor::processModulation(float input)
 //-----------------------------------------------------------------------------
 float PluginProcessor::processComplexReverbSample(float input)
 {
-    // ===== STAGE 1: INPUT DIFFUSION =====
-    // Pre-delay for early reflection separation
-    static std::vector<float> preDelayBuffer(8820, 0.0f); // 200ms at 44.1kHz
+    // ===== STAGE 1: SIMPLIFIED INPUT DIFFUSION =====
+    // Reduced pre-delay buffer size for less memory usage and latency
+    static std::vector<float> preDelayBuffer(8820, 0.0f); // 200ms at 44.1kHz (reduced)
     static int preDelayPos = 0;
     
-    int preDelayTime = (int)(mSampleRate * 0.01f * mReverbSize); // 0-20ms pre-delay (reduced)
+    int preDelayTime = (int)(mSampleRate * 0.01f * (1.0f + mReverbSize * 1.5f)); // 10-25ms pre-delay (reduced)
     if (preDelayTime >= preDelayBuffer.size()) preDelayTime = preDelayBuffer.size() - 1;
     
     int preDelayReadPos = (preDelayPos + preDelayBuffer.size() - preDelayTime) % preDelayBuffer.size();
@@ -1175,14 +1361,12 @@ float PluginProcessor::processComplexReverbSample(float input)
     preDelayBuffer[preDelayPos] = input;
     preDelayPos = (preDelayPos + 1) % preDelayBuffer.size();
     
-    // Input diffusion using cascaded allpass filters with smaller delays
-    static std::vector<float> allpass1(347, 0.0f);  // Smaller, prime-number delays
-    static std::vector<float> allpass2(113, 0.0f);
-    static std::vector<float> allpass3(37, 0.0f);
-    static std::vector<float> allpass4(59, 0.0f);
-    static int ap1pos = 0, ap2pos = 0, ap3pos = 0, ap4pos = 0;
+    // Simplified input diffusion with only two allpass filters
+    static std::vector<float> allpass1(223, 0.0f);  // Reduced complexity
+    static std::vector<float> allpass2(149, 0.0f);
+    static int ap1pos = 0, ap2pos = 0;
     
-    // Allpass filter function with reduced feedback for less delay-like sound
+    // Simplified allpass filter function
     auto processAllpass = [&](float in, std::vector<float>& buffer, int& pos, float feedback) -> float {
         float delayed = buffer[pos];
         float output = -in + delayed;
@@ -1192,42 +1376,40 @@ float PluginProcessor::processComplexReverbSample(float input)
     };
     
     float diffused = preDelayed;
-    diffused = processAllpass(diffused, allpass1, ap1pos, 0.5f);  // Reduced feedback
-    diffused = processAllpass(diffused, allpass2, ap2pos, 0.5f);
-    diffused = processAllpass(diffused, allpass3, ap3pos, 0.5f);
-    diffused = processAllpass(diffused, allpass4, ap4pos, 0.5f);
+    diffused = processAllpass(diffused, allpass1, ap1pos, 0.4f);  // Further reduced feedback
+    diffused = processAllpass(diffused, allpass2, ap2pos, 0.4f);
     
-    // ===== STAGE 2: COMB FILTERS FOR DENSE REVERB =====
-    // Multiple comb filters with different delay times
-    static std::vector<std::vector<float>> combFilters(6);
-    static std::vector<int> combPositions(6, 0);
-    static std::vector<float> combOutputs(6, 0.0f);
+    // ===== STAGE 2: SIMPLIFIED COMB FILTERS =====
+    // Reduced to 4 comb filters for less CPU usage and cleaner sound
+    static std::vector<std::vector<float>> combFilters(4);
+    static std::vector<int> combPositions(4, 0);
+    static std::vector<float> combOutputs(4, 0.0f);
     static bool combInitialized = false;
     
     if (!combInitialized) {
-        // Initialize comb filters with carefully chosen delay times
-        int combLengths[] = {1116, 1188, 1277, 1356, 1422, 1491}; // Classic Schroeder lengths
-        for (int i = 0; i < 6; i++) {
-            float sizeMultiplier = 1.0f + mReverbSize * 15.0f; // Massive scaling: 1x to 16x for huge sustain
+        // Initialize comb filters with moderate delay times
+        int combLengths[] = {1116, 1188, 1277, 1356}; // Classic Schroeder lengths (reduced)
+        for (int i = 0; i < 4; i++) {
+            float sizeMultiplier = 1.0f + mReverbSize * 8.0f; // Reduced scaling: 1x to 9x
             int length = (int)(combLengths[i] * sizeMultiplier);
             combFilters[i].resize(length, 0.0f);
         }
         combInitialized = true;
     }
     
-    // Process through comb filters with much higher sustain
+    // Process through comb filters with moderate sustain
     float combSum = 0.0f;
-    float feedback = 0.6f + mReverbSize * 0.35f; // 0.6 to 0.95 feedback for massive sustain
+    float feedback = 0.5f + mReverbSize * 0.3f; // 0.5 to 0.8 feedback (reduced)
     
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 4; i++) {
         if (!combFilters[i].empty()) {
             // Read delayed sample
             float delayed = combFilters[i][combPositions[i]];
             combOutputs[i] = delayed;
             
-            // Apply damping filter to reduce high frequencies over time
-            static float dampingFilters[6] = {0};
-            float dampingAmount = 0.2f + (1.0f - mReverbSize) * 0.3f;
+            // Apply gentler damping filter
+            static float dampingFilters[4] = {0};
+            float dampingAmount = 0.15f + (1.0f - mReverbSize) * 0.2f; // Reduced damping
             dampingFilters[i] = dampingFilters[i] * (1.0f - dampingAmount) + delayed * dampingAmount;
             float damped = delayed * (1.0f - dampingAmount) + dampingFilters[i] * dampingAmount;
             
@@ -1235,9 +1417,8 @@ float PluginProcessor::processComplexReverbSample(float input)
             combFilters[i][combPositions[i]] = diffused + damped * feedback;
             combPositions[i] = (combPositions[i] + 1) % combFilters[i].size();
             
-            // Sum outputs with different weights
-            float weight = 1.0f / (6.0f + i * 0.1f); // Slightly different weights
-            combSum += combOutputs[i] * weight;
+            // Sum outputs with equal weights for cleaner sound
+            combSum += combOutputs[i] * 0.25f; // Equal weighting
         }
     }
     
@@ -1251,143 +1432,63 @@ float PluginProcessor::processComplexReverbSample(float input)
     finalDiffused = processAllpass(finalDiffused, finalAP1, finalAP1pos, 0.5f);
     finalDiffused = processAllpass(finalDiffused, finalAP2, finalAP2pos, 0.5f);
     
-    // ===== STAGE 4: ELYSIERA-STYLE ADVANCED SHIMMER =====
+    // ===== STAGE 4: SIMPLIFIED SHIMMER EFFECT =====
     float shimmerOutput = finalDiffused;
     if (mReverbShimmer > 0.01f) {
-        // Elysiera-style dual pitch shifter shimmer with modulation
-        static std::vector<float> shimmerBufferA(22050, 0.0f); // 500ms buffer for pitch A
-        static std::vector<float> shimmerBufferB(22050, 0.0f); // 500ms buffer for pitch B
+        // Much simpler shimmer effect to reduce CPU and aliasing
+        static std::vector<float> shimmerBuffer(11025, 0.0f); // 250ms buffer (reduced)
         static int shimmerWritePos = 0;
-        static float shimmerReadPosA = 0.0f;
-        static float shimmerReadPosB = 0.0f;
-        static float modPhaseA = 0.0f;
-        static float modPhaseB = 0.0f;
-        static float crossfadePhase = 0.0f;
+        static float shimmerReadPos = 0.0f;
+        static float shimmerPhase = 0.0f;
         
-        // Store input in both buffers
-        shimmerBufferA[shimmerWritePos] = finalDiffused;
-        shimmerBufferB[shimmerWritePos] = finalDiffused;
-        shimmerWritePos = (shimmerWritePos + 1) % shimmerBufferA.size();
+        // Store input in buffer
+        shimmerBuffer[shimmerWritePos] = finalDiffused;
+        shimmerWritePos = (shimmerWritePos + 1) % shimmerBuffer.size();
         
-        // Elysiera pitch configuration
-        float pitchA = 12.0f; // +1 octave (12 semitones)
-        float pitchB = 5.0f;  // +perfect 4th (5 semitones)
-        float pitchAVol = 0.6f * mReverbShimmer;
-        float pitchBVol = 0.6f * mReverbShimmer;
+        // Simple octave-up shimmer (12 semitones)
+        float pitchRatio = 2.0f; // Fixed octave up, no modulation
+        float shimmerVol = 0.4f * mReverbShimmer; // Reduced volume
         
-        // Modulation oscillators (like Elysiera)
-        float modRate = 3.1f; // Hz
-        modPhaseA += (modRate / mSampleRate) * TWO_PI;
-        modPhaseB += (modRate / mSampleRate) * TWO_PI;
-        crossfadePhase += (1024.0f / mSampleRate) * TWO_PI; // Crossfade rate
-        
-        if (modPhaseA >= TWO_PI) modPhaseA -= TWO_PI;
-        if (modPhaseB >= TWO_PI) modPhaseB -= TWO_PI;
-        if (crossfadePhase >= TWO_PI) crossfadePhase -= TWO_PI;
-        
-        // Modulated pitch ratios
-        float pitchModA = sin(modPhaseA) * 0.1f; // Small modulation
-        float pitchModB = cos(modPhaseB) * 0.1f; // Small modulation
-        
-        // Convert semitones to pitch ratios with modulation
-        float pitchRatioA = pow(2.0f, (pitchA + pitchModA) / 12.0f);
-        float pitchRatioB = pow(2.0f, (pitchB + pitchModB) / 12.0f);
-        
-        // Pitch shifter A (like Elysiera ef.transpose)
-        shimmerReadPosA += pitchRatioA;
-        if (shimmerReadPosA >= shimmerBufferA.size()) {
-            shimmerReadPosA -= shimmerBufferA.size();
+        // Simple pitch shifting without complex interpolation
+        shimmerReadPos += pitchRatio;
+        if (shimmerReadPos >= shimmerBuffer.size()) {
+            shimmerReadPos -= shimmerBuffer.size();
         }
         
-        // High-quality interpolation for pitch A
-        int readIndexA = (int)shimmerReadPosA;
-        float fractionA = shimmerReadPosA - readIndexA;
-        int nextIndexA = (readIndexA + 1) % shimmerBufferA.size();
-        int prevIndexA = (readIndexA - 1 + shimmerBufferA.size()) % shimmerBufferA.size();
-        int nextNextIndexA = (readIndexA + 2) % shimmerBufferA.size();
+        // Simple linear interpolation only
+        int readIndex = (int)shimmerReadPos;
+        float fraction = shimmerReadPos - readIndex;
+        int nextIndex = (readIndex + 1) % shimmerBuffer.size();
         
-        // Cubic interpolation for pitch A
-        float aA = shimmerBufferA[prevIndexA];
-        float bA = shimmerBufferA[readIndexA];
-        float cA = shimmerBufferA[nextIndexA];
-        float dA = shimmerBufferA[nextNextIndexA];
+        float pitchShifted = shimmerBuffer[readIndex] * (1.0f - fraction) +
+                            shimmerBuffer[nextIndex] * fraction;
         
-        float pitchShiftedA = bA + 0.5f * fractionA * (cA - aA + fractionA * (2.0f * aA - 5.0f * bA + 4.0f * cA - dA + fractionA * (3.0f * (bA - cA) + dA - aA)));
+        // Simple low-pass filter to reduce aliasing
+        static float shimmerFilter = 0.0f;
+        shimmerFilter = shimmerFilter * 0.7f + pitchShifted * 0.3f;
         
-        // Pitch shifter B (like Elysiera ef.transpose)
-        shimmerReadPosB += pitchRatioB;
-        if (shimmerReadPosB >= shimmerBufferB.size()) {
-            shimmerReadPosB -= shimmerBufferB.size();
-        }
-        
-        // High-quality interpolation for pitch B
-        int readIndexB = (int)shimmerReadPosB;
-        float fractionB = shimmerReadPosB - readIndexB;
-        int nextIndexB = (readIndexB + 1) % shimmerBufferB.size();
-        int prevIndexB = (readIndexB - 1 + shimmerBufferB.size()) % shimmerBufferB.size();
-        int nextNextIndexB = (readIndexB + 2) % shimmerBufferB.size();
-        
-        // Cubic interpolation for pitch B
-        float aB = shimmerBufferB[prevIndexB];
-        float bB = shimmerBufferB[readIndexB];
-        float cB = shimmerBufferB[nextIndexB];
-        float dB = shimmerBufferB[nextNextIndexB];
-        
-        float pitchShiftedB = bB + 0.5f * fractionB * (cB - aB + fractionB * (2.0f * aB - 5.0f * bB + 4.0f * cB - dB + fractionB * (3.0f * (bB - cB) + dB - aB)));
-        
-        // Elysiera-style crossfading and modulation
-        float crossfade = (sin(crossfadePhase) + 1.0f) * 0.5f; // 0 to 1
-        
-        // Mix the two pitch shifters with crossfading (like Elysiera)
-        float shimmerMixA = pitchShiftedA * pitchAVol * (1.0f - crossfade);
-        float shimmerMixB = pitchShiftedB * pitchBVol * crossfade;
-        
-        // Apply anti-aliasing to shimmer output
-        static float shimmerAAFilter1 = 0.0f;
-        static float shimmerAAFilter2 = 0.0f;
-        
-        float shimmerMixed = shimmerMixA + shimmerMixB;
-        
-        // Two-stage anti-aliasing
-        shimmerAAFilter1 = shimmerAAFilter1 * 0.8f + shimmerMixed * 0.2f;
-        shimmerAAFilter2 = shimmerAAFilter2 * 0.7f + shimmerAAFilter1 * 0.3f;
-        
-        float cleanShimmer = shimmerAAFilter2;
-        
-        // Mix with original reverb (Elysiera style)
-        float shimmerAmount = mReverbShimmer;
-        shimmerOutput = finalDiffused * (1.0f - shimmerAmount) + cleanShimmer * shimmerAmount;
+        // Mix with original reverb
+        float shimmerAmount = mReverbShimmer * 0.6f; // Reduced intensity
+        shimmerOutput = finalDiffused * (1.0f - shimmerAmount) + shimmerFilter * shimmerAmount;
     }
     
-    // ===== STAGE 5: FINAL OUTPUT WITH ENHANCED ANTI-ALIASING =====
+    // ===== STAGE 5: SIMPLIFIED FINAL OUTPUT =====
     float finalReverb = shimmerOutput;
     
-    // Multi-stage anti-aliasing to eliminate remaining buzz
-    static float antiAliasingFilter1 = 0.0f;
-    static float antiAliasingFilter2 = 0.0f;
-    static float antiAliasingFilter3 = 0.0f;
+    // Single-stage gentle anti-aliasing
+    static float antiAliasingFilter = 0.0f;
     
-    // First stage: aggressive low-pass
-    float cutoffFreq1 = 0.6f; // Very aggressive
-    antiAliasingFilter1 = antiAliasingFilter1 * (1.0f - cutoffFreq1) + finalReverb * cutoffFreq1;
+    // Gentle low-pass filter
+    float cutoffFreq = 0.15f; // Much less aggressive
+    antiAliasingFilter = antiAliasingFilter * (1.0f - cutoffFreq) + finalReverb * cutoffFreq;
     
-    // Second stage: medium low-pass
-    float cutoffFreq2 = 0.4f;
-    antiAliasingFilter2 = antiAliasingFilter2 * (1.0f - cutoffFreq2) + antiAliasingFilter1 * cutoffFreq2;
+    finalReverb = antiAliasingFilter;
     
-    // Third stage: gentle low-pass for smoothness
-    float cutoffFreq3 = 0.2f;
-    antiAliasingFilter3 = antiAliasingFilter3 * (1.0f - cutoffFreq3) + antiAliasingFilter2 * cutoffFreq3;
+    // Gentle tanh saturation for musical character
+    finalReverb = tanh(finalReverb * 0.8f) * 1.1f;
     
-    finalReverb = antiAliasingFilter3;
-    
-    // Very gentle saturation to avoid harsh artifacts
-    if (fabs(finalReverb) > 0.2f) {
-        finalReverb = tanh(finalReverb * 0.2f) * 5.0f; // Even gentler compression
-    }
-    
-    // Proper gain scaling
-    finalReverb *= 0.2f; // Further reduced to prevent loudness issues
+    // Conservative gain scaling
+    finalReverb *= 0.4f; // Increased from 0.2f for better level
     
     return finalReverb;
 }

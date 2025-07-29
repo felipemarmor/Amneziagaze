@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(AMNEZIAGAZE VERSION 0.2.7)
+project(AMNEZIAGAZE VERSION 1.0.0)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
